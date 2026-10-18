@@ -1,0 +1,55 @@
+# Copy to terraform.tfvars and replace AMI IDs / image URIs.
+# Do not commit secrets. No passwords belong in this file.
+
+aws_region  = "ap-southeast-1"
+project     = "Maghad"
+environment = "dev"
+
+default_tags = {
+  Project     = "Maghad"
+  Environment = "dev"
+  ManagedBy   = "Terraform"
+}
+
+vpc_cidr                = "10.20.0.0/16"
+public_subnet_cidrs     = ["10.20.1.0/24", "10.20.2.0/24"]
+private_app_subnet_cidr = "10.20.11.0/24"
+private_db_subnet_cidr  = "10.20.21.0/24"
+availability_zones      = ["ap-southeast-1a", "ap-southeast-1b"]
+
+enable_nat        = true
+nat_instance_type = "t3.micro"
+# Amazon Linux 2023 AMI for ap-southeast-1 — look up current ID:
+#   aws ec2 describe-images --owners amazon \
+#     --filters "Name=name,Values=al2023-ami-2023*-x86_64" \
+#     --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text
+nat_ami_id = "ami-REPLACE_WITH_AL2023_AMI"
+
+allowed_http_cidrs = ["0.0.0.0/0"] # Restrict to office/VPN CIDRs in real use
+app_port           = 8080
+
+ecr_repository_names     = ["api", "render-worker"]
+ecr_tagged_image_count   = 10
+ecr_untagged_image_days  = 7
+
+# Placeholder image URIs — replace with real pushed images before ECS can become healthy
+api_image            = "ACCOUNT_ID.dkr.ecr.ap-southeast-1.amazonaws.com/maghad-dev-api:latest"
+render_worker_image  = "ACCOUNT_ID.dkr.ecr.ap-southeast-1.amazonaws.com/maghad-dev-render-worker:latest"
+
+api_cpu          = 1024
+api_memory       = 2048
+api_desired_count = 1
+
+render_worker_cpu            = 1024
+render_worker_memory         = 2048
+render_worker_container_port = 8081
+render_worker_desired_count  = 1
+
+health_check_path    = "/health"
+health_check_matcher = "200"
+
+postgres_ami_id          = "ami-REPLACE_WITH_AL2023_AMI"
+postgres_instance_type   = "t3.medium"
+postgres_major_version   = "16"
+postgres_volume_size_gb  = 50
+postgres_database_name   = "maghad"

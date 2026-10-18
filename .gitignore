@@ -1,0 +1,22 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Secrets / local vars
+*.tfvars
+!*.tfvars.example
+secrets.auto.tfvars
+
+# OS / editor
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,116 @@
+#!/bin/bash
+set -euo pipefail
+exec > >(tee /var/log/postgres-bootstrap.log | logger -t postgres-bootstrap -s 2>/dev/console) 2>&1
+
+MARKER=/var/lib/maghad-postgres-bootstrap.done
+PG_MAJOR="${postgres_major_version}"
+DB_NAME="${database_name}"
+
+echo "Starting PostgreSQL $${PG_MAJOR} bootstrap..."
+
+if [[ -f "$${MARKER}" ]]; then
+  echo "Bootstrap already completed; ensuring service is running."
+  systemctl enable --now "postgresql-$${PG_MAJOR}" 2>/dev/null || systemctl enable --now postgresql 2>/dev/null || true
+  exit 0
+fi
+
+# Install PostgreSQL from Amazon Linux extras / PGDG as available
+if command -v dnf >/dev/null 2>&1; then
+  dnf update -y
+  # Amazon Linux 2023: install postgresql$${PG_MAJOR} server if available, else postgresql15
+  if dnf list available "postgresql$${PG_MAJOR}-server" >/dev/null 2>&1; then
+    dnf install -y "postgresql$${PG_MAJOR}-server" "postgresql$${PG_MAJOR}"
+    PGDATA=/var/lib/pgsql/$${PG_MAJOR}/data
+    PGSERVICE="postgresql-$${PG_MAJOR}"
+  elif dnf list available postgresql15-server >/dev/null 2>&1; then
+    echo "Requested major $${PG_MAJOR} not in repos; installing postgresql15"
+    dnf install -y postgresql15-server postgresql15
+    PG_MAJOR=15
+    PGDATA=/var/lib/pgsql/15/data
+    PGSERVICE=postgresql-15
+  else
+    dnf install -y postgresql-server postgresql
+    PGDATA=/var/lib/pgsql/data
+    PGSERVICE=postgresql
+  fi
+elif command -v yum >/dev/null 2>&1; then
+  yum update -y
+  amazon-linux-extras enable "postgresql$${PG_MAJOR}" 2>/dev/null || true
+  yum install -y "postgresql$${PG_MAJOR}-server" "postgresql$${PG_MAJOR}" || yum install -y postgresql-server postgresql
+  PGDATA=/var/lib/pgsql/$${PG_MAJOR}/data
+  PGSERVICE="postgresql-$${PG_MAJOR}"
+  if [[ ! -d "$${PGDATA}" ]]; then
+    PGDATA=/var/lib/pgsql/data
+    PGSERVICE=postgresql
+  fi
+else
+  echo "Unsupported OS package manager" >&2
+  exit 1
+fi
+
+# Initialize data directory if needed
+if [[ ! -f "$${PGDATA}/PG_VERSION" ]]; then
+  if command -v "postgresql-$${PG_MAJOR}-setup" >/dev/null 2>&1; then
+    "postgresql-$${PG_MAJOR}-setup" initdb
+  elif command -v postgresql-setup >/dev/null 2>&1; then
+    postgresql-setup --initdb
+  else
+    sudo -u postgres initdb -D "$${PGDATA}"
+  fi
+fi
+
+# Listen on private interface only (not localhost-only)
+PRIVATE_IP=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/local-ipv4 || hostname -I | awk '{print $1}')
+
+CONF="$${PGDATA}/postgresql.conf"
+HBA="$${PGDATA}/pg_hba.conf"
+
+# Idempotent listen_addresses and port settings
+if grep -qE '^#?listen_addresses\s*=' "$${CONF}"; then
+  sed -i "s/^#\?listen_addresses\s*=.*/listen_addresses = '$${PRIVATE_IP}'/" "$${CONF}"
+else
+  echo "listen_addresses = '$${PRIVATE_IP}'" >> "$${CONF}"
+fi
+
+if grep -qE '^#?password_encryption\s*=' "$${CONF}"; then
+  sed -i "s/^#\?password_encryption\s*=.*/password_encryption = scram-sha-256/" "$${CONF}"
+else
+  echo "password_encryption = scram-sha-256" >> "$${CONF}"
+fi
+
+# pg_hba: keep local peer auth; require scram for network connections.
+# Network access is further restricted by the AWS security group (ECS SG only).
+# Do NOT open trust auth. Operator must set a password via SSM before app use.
+cat > "$${HBA}" <<HBAEOF
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+local   all             all                                     peer
+host    all             all             127.0.0.1/32            scram-sha-256
+host    all             all             ::1/128                 scram-sha-256
+# Allow VPC private connections with scram (SG enforces ECS-only source)
+host    all             all             ${vpc_cidr}             scram-sha-256
+HBAEOF
+
+systemctl enable "$${PGSERVICE}"
+systemctl restart "$${PGSERVICE}"
+
+# Create application database and role WITHOUT a password (operator sets it via SSM).
+sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
+SELECT 'CREATE DATABASE ${database_name}'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${database_name}')\gexec
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'maghad_app') THEN
+    CREATE ROLE maghad_app LOGIN;
+  END IF;
+END
+\$\$;
+GRANT ALL PRIVILEGES ON DATABASE ${database_name} TO maghad_app;
+SQL
+
+# Ensure SSM agent is running
+systemctl enable amazon-ssm-agent 2>/dev/null || true
+systemctl start amazon-ssm-agent 2>/dev/null || true
+
+touch "$${MARKER}"
+echo "PostgreSQL bootstrap complete. Set maghad_app password via SSM before application use."
+echo "Credentials were NOT written to disk by this script."
